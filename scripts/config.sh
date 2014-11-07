@@ -4,10 +4,11 @@
 # This script contains common configuration settings and functions.
 #
 
+# export all variables to subshells
 set -a
 
 #######################################
-# configuration
+# configuration (can be modified)
 
 # the github project name
 classname="ucr-cs100"
@@ -25,14 +26,21 @@ instructorinfo="people/instructors"
 studentinfo="people/students"
 
 #######################################
-# let us quit the shell even if we're in a subshell
+# initialization (do not modify!)
 
+# let us quit the shell even if we're in a subshell
 trap "exit 1" TERM
 export TOP_PID=$$
 
 function failScript {
     kill -s TERM $TOP_PID
 }
+
+# cd to the repo's root folder by backtracking until we find the LICENSE file
+# this let's the scripts be run from any folder in the repo
+while [ ! -e "LICENSE" ]; do
+    cd ..
+done
 
 #######################################
 # misc display functions
@@ -56,9 +64,23 @@ function padPercent {
     printf "$1"
 }
 
+##########################################
+#colors
+red="\x1b[31m"
+green="\x1b[32m"
+yellow="\x1b[33m"
+blue="\x1b[34m"
+mag="\x1b[35m"
+cyn="\x1b[36m"
+endcolor="\x1b[0m"
+
 function error {
-    echo "ERROR: $@" >&2
+    echo -e "$red ERROR: $@$endcolor" >&2
     failScript
+}
+function warning
+{
+    echo -e "$yellow WARN: $@$endcolor" >&2
 }
 
 #######################################
@@ -105,17 +127,16 @@ function downloadGrades {
 # $1 = the name of the repo on github that has the students' projects
 # $2 = [optional] branch of project to enter
 function downloadAllProjects {
+
+    # tells git to keep the username and password in memory for the next 15 minutes
+    git config credential.helper cache
+
     echo "downloading repos..."
-    #accountlist=""
-    #for student in $(getStudentList); do
-        #githubaccount=$(getStudentInfo $student github)
-        #accountlist="$accountlist $student"
-        #accountlist="$accountlist $githubaccount"
-    #done
     accountlist=$(getStudentList)
 
-    # NOTE: this weird xargs command runs all of the downloadProject functions in parallel
-    if ! (echo "$accountlist" | xargs -n 1 -P 4 bash -c "downloadProject $1 \$1 $2" -- ); then
+    # this weird xargs command runs all of the downloadProject functions in parallel
+    if ! (echo "$accountlist" | xargs -n 1 -P 50 bash -c "downloadProject $1 \$1 $2" -- ); then
+    #if ! (echo "$accountlist" | xargs -n 1 -P 4 bash -c "downloadProject $1 \$1 $2" -- ); then
         echo "ERROR: some repos failed to download;"
         echo "sometimes we exceed github's connection limits due to parallel downloading;"
         echo "trying again might work?"
@@ -146,11 +167,15 @@ function downloadRepo {
     # download repo
     if [ ! -d "$clonedir" ]; then
         echo "  running git clone on [$giturl]"
-        git clone --quiet "$giturl" "$clonedir"
+        #if [ -z "$branch" ]; then
+            git clone --quiet "$giturl" "$clonedir"
+        #else
+            #git clone -b "$branch" --quiet "$giturl" "$clonedir"
+        #fi
     else
         echo "  running git pull in [$clonedir]"
         cd "$clonedir"
-        git pull origin --quiet > /dev/null 2> /dev/null
+        git pull origin $branch --quiet > /dev/null 2> /dev/null
         cd "$dir"
     fi
 
@@ -168,14 +193,13 @@ function downloadRepo {
 }
 
 function uploadAllGrades {
+    # tells git to keep the username and password in memory for the next 15 minutes
+    git config credential.helper cache
+
     echo "uploading repos..."
-    #accountlist=""
-    #for student in $(getStudentList); do
-        #accountlist="$accountlist $student"
-    #done
     accountlist=$(getStudentList)
 
-    # NOTE: this weird xargs command runs all of the downloadProject functions in parallel
+    # this weird xargs command runs all of the uploadGrades functions in parallel
     if ! (echo "$accountlist" | xargs -n 1 -P 4 bash -c "uploadGrades \$1" -- ); then
         error "ERROR: some repos failed to upload; sometimes we exceed github's connection limits due to parallel uploading; trying again might work?"
     fi
@@ -189,6 +213,15 @@ function uploadGrades {
     for file in `find . -name grade`; do
         git add $file
     done
+
+    local email=$(git config --get user.email)
+    local key=$(git config --get user.signingkey)
+    if ( ! includesKey people/instructors/$email $key); then
+        echo "Your signing key does not exist in the repository"
+	echo "Appending signing key to class repository"
+        gpg --export $key >> people/instructor/$email
+    fi
+
     git commit -S -m "graded assignment using automatic scripts"
 
     echo "changes committed... uploading to github"
@@ -214,36 +247,6 @@ function gradeAssignment {
 
     mkdir -p `dirname $1`
 
-    local csaccount
-
-    # let the grader know who they're grading
-    echo "#####################################" >> "$file"
-    echo "#" >> "$file"
-    echo "# $file" >> "$file"
-    echo "#" >> "$file"
-    echo "# name      = $name" >> "$file"
-    echo "# csaccount = $csaccount" >> "$file"
-    echo "# github    = $githubaccount" >> "$file"
-    echo "#" >> "$file"
-    echo "# any line that begins with a # is a comment and won't be written to the file" >> "$file"
-    echo "#" >> "$file"
-    echo "#####################################" >> "$file"
-
-    vim "$file"
-
-    # delete all the comments from the file
-    sed -i "/^\#/d" "$file"
-}
-
-# $1 = the path of the grade file to edit
-# $2 = the csaccount of the person
-function gradefile {
-    file="$1"
-
-    mkdir -p `dirname $1`
-
-    local csaccount
-
     # let the grader know who they're grading
     echo "#####################################" >> "$file"
     echo "#" >> "$file"
@@ -266,15 +269,18 @@ function gradefile {
 #######################################
 # parsing grades
 
+# $1 = the grade file
 function isGraded {
     # is the first word in the file $1 is "/", then it is not graded
     return `! grep '^[[:blank:]]*/' -q "$1"`
 }
 
+# $1 = the grade file
 function getGrade {
     head -n 1 "$1" | sed 's/\// /' | awk '{print $1;}'
 }
 
+# $1 = the grade file
 function getOutOf {
     if isGraded $1; then
         head -n 1 "$1" | sed 's/\// /' | awk '{print $2;}'
@@ -332,25 +338,27 @@ function totalOutOf {
 #######################################
 # displaying grades
 
+# $1 = percent
 function colorPercent {
     local per="$1"
     if [[ -z $1 ]]; then
         resetColor
     elif ((`bc <<< "$per>90"`)); then
-        printf "\x1b[32m"
+        printf "$green"
     elif ((`bc <<< "$per>80"`)); then
-        printf "\x1b[36m"
+        printf "$cyn"
     elif ((`bc <<< "$per>70"`)); then
-        printf "\x1b[33m"
+        printf "$yellow"
     else
-        printf "\x1b[31m"
+        printf "$red"
     fi
 }
 
 function resetColor {
-    printf "\x1b[0m"
+    printf "$endcolor"
 }
 
+# $1 = percent
 function dispPercent {
     local per="$1"
     colorPercent "$per"
@@ -358,6 +366,7 @@ function dispPercent {
     resetColor
 }
 
+# $1 = percent
 function percentToLetter {
     per="$1"
     colorPercent "$1"
@@ -391,4 +400,46 @@ function percentToLetter {
     resetColor
 }
 
+##################################
+#checks if a public key is in the instructor files
+# $1 = file to check
+# $2 = key to compare
+function includesKey
+{
+    local instructor=$1
+    local key=$2
+
+    if [ ! -f $instructor ]; then
+        return 1
+    fi
+
+    local instructorKeys=$( gpg --with-fingerprint $instructor | sed -n '/pub/p' | cut -c 12,13,14,15,16,17,18,19 )
+
+    if [[ $instructorKeys == *$key* ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+##########################################
+#checks if keys are installed
+checkKeys()
+{
+    which gpg > /dev/null 2> /dev/null
+    if [ ! $? -eq 0 ];then
+        error "you need to install gpg:$yellow https://www.gnupg.org/download/"
+    fi
+    for INST in people/instructors/*;do
+        local STR=${INST##*/}
+        if [[ $STR == *@* ]];then
+            gpg --list-keys $STR  > /dev/null 2> /dev/null
+            if [ ! $? -eq 0 ] ;then
+                warning "Instructor keys were not installed! Installing..."
+                scripts/install-instructor-keys.sh
+                echo -e "$green Done installing keys!!$endcolor"
+            fi
+        fi
+    done
+}
 
